@@ -1,0 +1,132 @@
+name: lks-dev-pipeline
+on:
+  push:
+    branches:
+      - "dev"
+
+env:
+  AWS_REGION: "us-east-1"
+  ENV: "dev"
+  ECR_REPOSITORY: "lks-voting-image"
+
+jobs:
+  build:
+    name: Build application image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build and push all images
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          # Build and Push Vote
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:vote-$ENV-latest ./vote
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:vote-$ENV-latest
+          
+          # Build and Push Result
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:result-$ENV-latest ./result
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:result-$ENV-latest
+          
+          # Build and Push Worker
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:worker-$ENV-latest ./worker
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:worker-$ENV-latest
+
+  pull-master:
+    name: Pull Image on master
+    needs: build
+    runs-on: master
+    steps:
+      - name: Update docker version on runner
+        run: docker --version
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+      - name: Pull images
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker pull $ECR_REGISTRY/$ECR_REPOSITORY:vote-$ENV-latest
+          docker pull $ECR_REGISTRY/$ECR_REPOSITORY:result-$ENV-latest
+          docker pull $ECR_REGISTRY/$ECR_REPOSITORY:worker-$ENV-latest
+
+  pull-node1:
+    name: Pull Image on node1
+    needs: pull-master
+    runs-on: node1
+    steps:
+      - name: Update docker version on runner
+        run: docker --version
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+      - name: Pull images
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker pull $ECR_REGISTRY/$ECR_REPOSITORY:vote-$ENV-latest
+          docker pull $ECR_REGISTRY/$ECR_REPOSITORY:result-$ENV-latest
+          docker pull $ECR_REGISTRY/$ECR_REPOSITORY:worker-$ENV-latest
+
+  pull-node2:
+    name: Pull Image on node2
+    needs: pull-node1
+    runs-on: node2
+    steps:
+      - name: Update docker version on runner
+        run: docker --version
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+      - name: Pull images
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker pull $ECR_REGISTRY/$ECR_REPOSITORY:vote-$ENV-latest
+          docker pull $ECR_REGISTRY/$ECR_REPOSITORY:result-$ENV-latest
+          docker pull $ECR_REGISTRY/$ECR_REPOSITORY:worker-$ENV-latest
+
+  deploy:
+    name: Deploy Application into Docker Swarm
+    needs: pull-node2
+    runs-on: master
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Deploy application images to Docker Swarm
+        run: |
+          docker stack deploy --compose-file docker-stack.yml lks-voting-stack
