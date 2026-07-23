@@ -1,0 +1,129 @@
+name: lks-prod-pipeline
+on:
+  push:
+    branches:
+      - "prod"
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: lks-voting-image
+  ECS_CLUSTER: lks-voting-cluster
+  ENV: "prod"
+
+jobs:
+  build:
+    name: Build Image Production
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build, tag, and push images to ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:vote-$ENV-latest ./vote
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:vote-$ENV-latest
+          
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:result-$ENV-latest ./result
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:result-$ENV-latest
+          
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:worker-$ENV-latest ./worker
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:worker-$ENV-latest
+          
+          echo "registry=$ECR_REGISTRY" >> $GITHUB_OUTPUT
+
+  deploy:
+    name: Deploy Application to ECS
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      # --- DEPLOY VOTE ---
+      - name: Render task definition for Vote
+        id: task-def-vote
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: vote/task-definition.json
+          container-name: lks-vote-container
+          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:vote-${{ env.ENV }}-latest
+
+      - name: Deploy ECS task definition for Vote
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def-vote.outputs.task-definition }}
+          service: lks-vote-service
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      # --- DEPLOY RESULT ---
+      - name: Render task definition for Result
+        id: task-def-result
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: result/task-definition.json
+          container-name: lks-result-container
+          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:result-${{ env.ENV }}-latest
+
+      - name: Deploy ECS task definition for Result
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def-result.outputs.task-definition }}
+          service: lks-result-service
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      # --- DEPLOY WORKER ---
+      - name: Render task definition for Worker
+        id: task-def-worker
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: worker/task-definition.json
+          container-name: lks-worker-container
+          image: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:worker-${{ env.ENV }}-latest
+
+      - name: Deploy ECS task definition for Worker
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def-worker.outputs.task-definition }}
+          service: lks-worker-service
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      # --- SEND SNS NOTIFICATION ---
+      - name: Publish Message To SNS Subscribers
+        if: success()
+        env:
+          TOPIC_ARN: ${{ secrets.AWS_SNS_ARN }}
+        run: |
+          aws sns publish \
+            --topic-arn $TOPIC_ARN \
+            --subject "Hello from Bengkulu!" \
+            --message "New version The Voting App from Bengkulu is Released!!"
